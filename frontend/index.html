@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chat</title>
+</head>
+<body>
+    <button id="poll" onclick="connect(ConnectionType.poll)">Connect via Poll</button>
+    <button id="long_poll" onclick="connect(ConnectionType.long_poll)">Connect via Long Poll</button>
+    <button id="websocket" onclick="connect(ConnectionType.websocket)">Connect via WebSocket</button>
+    <button id="disconnect" onclick="disconnect()">Disconnect</button>
+
+    <div style="background-color: cyan;">
+        <h1>Status</h1>
+        <p id="status">NOT CONNECTED</p>
+    </div>
+
+    <textarea name="Chat" id="chat" cols="30" rows="10" readonly></textarea>
+
+    <div></div>
+    
+    <input type="text" name="chat_input" id="input_message">
+    <button onclick=send_message()>Send</button>
+
+    <script defer>
+        const ConnectionType =
+        {
+            none: 0,
+            poll: 1,
+            long_poll: 2,
+            websocket: 3
+        }
+
+        const PORT = 7032;
+        const ADDRESS = `https://localhost:${PORT}`;
+
+        let connection_type = ConnectionType.none;
+        let connection_id = null;
+        let user_id = null;
+        let messages = [];
+        let socket = null;
+
+        const connected = () => connection_type != ConnectionType.none;
+
+        const chat_status = document.getElementById('status');
+        const chat = document.getElementById("chat");
+
+        function disconnect()
+        {
+            if(!connected()) return;
+            
+            console.log("Disconnecting...");
+
+            messages = [];
+            chat.value = "";
+            connection_type = ConnectionType.none;
+
+            if(connection_id != null)
+            {
+                clearInterval(connection_id);
+                connection_id = null;
+            }
+            if(user_id != null)
+            {
+                if(socket == null)
+                {
+                    var xhr = new XMLHttpRequest();
+                    xhr.open("POST", `${ADDRESS}/leave?user_id=${user_id}`, true);
+                    xhr.onload = function() { chat_status.innerHTML = this.responseText; }
+                    xhr.onerror = function() { chat_status.innerHTML = this.responseText; }
+                    xhr.send();
+                }
+
+                user_id = null;
+            }
+            if(socket != null)
+            {
+                socket.close();
+                socket = null;
+            }
+
+            enableConnection();
+        }
+
+        function connect(conn_type)
+        {
+            if(conn_type == ConnectionType.websocket)
+            {
+                web_socket();
+                return;
+            }
+
+            var xhr = new XMLHttpRequest();
+            xhr.open("POST", `${ADDRESS}/join?connection_type=${conn_type}`, true);
+
+            xhr.onload = function()
+            {
+                if(this.status == 200)
+                {
+                    disableConnection();
+
+                    // Get user id from response
+                    user_id = Number.parseInt(this.responseXML.querySelector("UserId").textContent);
+                    chat_status.innerHTML = "User id: " + user_id;
+
+                    // Check for initial message if exists
+                    var msgCache = this.responseXML.querySelectorAll("InitialMessage");
+                    msgCache.forEach((msg) =>
+                    {
+                        messages.push({Sender: "stranger", Message:msg.textContent});
+                    });
+                    if(msgCache.length > 0)
+                    {
+                        update_messages();
+                    }
+
+                    // Begin with polling
+                    connection_type = conn_type;
+                    switch(connection_type)
+                    {
+                        case ConnectionType.poll:
+                            connection_id = setInterval(poll, 1000);
+                            break;
+                        case ConnectionType.long_poll:
+                            long_poll();
+                            break;
+                        default:
+                            break;
+                    }
+                }
+                else
+                {
+                    chat_status.innerHTML = this.responseText;
+                }
+            }
+            xhr.onerror = function() { chat_status.innerHTML = this.responseText; }
+
+            xhr.send();
+        }
+
+        function poll()
+        {
+            var xhr = new XMLHttpRequest();
+            xhr.open("GET", `${ADDRESS}/message?user_id=${user_id}`, true);
+            xhr.onload = function()
+            {
+                if(this.status == 200)
+                {
+                    var xmlString = new XMLSerializer().serializeToString(this.responseXML);
+                    var msgs = this.responseXML.querySelectorAll("string");
+                    console.log("Got messages: " + msgs.values());
+                    msgs.forEach((message) =>
+                    {
+                        messages.push({Sender: "stranger", Message:message.textContent});
+                    });
+
+                    if(msgs.length > 0)
+                    {
+                        update_messages();
+                    }
+                }
+                else
+                {
+                    chat_status.innerHTML = "Other: " + this.responseText;
+                    disconnect();
+                }
+            }
+            xhr.onerror = function()
+            {
+                chat_status.innerHTML = "Error " + this.responseText;
+                disconnect();
+            }
+
+            xhr.send(); 
+        }
+
+        function long_poll()
+        {
+            var xhr = new XMLHttpRequest();
+            xhr.open("GET", `${ADDRESS}/message?user_id=${user_id}`, true);
+            xhr.onload = function()
+            {
+                if(this.status == 200)
+                {
+                    var xmlString = new XMLSerializer().serializeToString(this.responseXML);
+                    var msgs = this.responseXML.querySelectorAll("string");
+                    console.log("Got messages: " + msgs.values());
+                    msgs.forEach((message) =>
+                    {
+                        messages.push({Sender: "stranger", Message:message.textContent});
+                    });
+
+                    if(msgs.length > 0)
+                    {
+                        update_messages();
+                    }
+                }
+                else
+                {
+                    chat_status.innerHTML = "Other: " + this.responseText;
+                    disconnect();
+                }
+
+                if(connected()) long_poll();
+            }
+            xhr.onerror = function()
+            {
+                chat_status.innerHTML = "Error " + this.responseText;
+                disconnect();
+            }
+
+            xhr.send(); 
+        }
+
+        function web_socket(conn_type)
+        {
+            console.log("WebSocket called!");
+            socket = new WebSocket(`wss://localhost:${PORT}/ws?connection_type=${ConnectionType.websocket}`);
+
+            socket.onopen = function (e)
+            {
+                disableConnection();
+                connection_type = ConnectionType.websocket;
+            };
+
+            socket.onmessage = function (e)
+            {
+                var parser = new DOMParser();
+                var xmlResponse = parser.parseFromString(e.data, "text/xml");
+
+                // Initial message
+                if(user_id == null)
+                {
+                    // Get user id from response
+                    user_id = Number.parseInt(xmlResponse.querySelector("UserId").textContent);
+                    chat_status.innerHTML = "User id: " + user_id;
+
+                    // Check for initial message if exists
+                    var msgCache = xmlResponse.querySelectorAll("InitialMessage");
+                    msgCache.forEach((msg) =>
+                    {
+                        messages.push({Sender: "stranger", Message:msg.textContent});
+                    });
+                    if(msgCache.length > 0)
+                    {
+                        update_messages();
+                    }
+                }
+
+                // Stranger message
+                else
+                {
+                    var msgs = xmlResponse.querySelectorAll("string");
+                    msgs.forEach((msg) =>
+                    {
+                        messages.push({Sender: "stranger", Message:msg.textContent});
+                    })
+                    if(msgs.length > 0)
+                    {
+                        update_messages();
+                    }
+                }
+            };
+
+            socket.onclose = function (e)
+            {
+                console.log("Socket closed!");
+                disconnect();
+            }
+
+            socket.onerror = function (e)
+            {
+                console.log("Socket error!");
+                disconnect();
+            }
+        }
+
+        // Updates messages in chat based on state of message array
+        function update_messages()
+        {
+            const formatted_msg = messages.map(({Sender, Message}) => `${Sender}: ${Message}`);
+            const joined_msg = formatted_msg.join('\n');
+            chat.value = joined_msg;
+        }
+
+        // Sends message to server
+        function send_message()
+        {
+            // Get text from input
+            var input_msg = document.getElementById("input_message");
+            if(!input_msg.value || !connected()) { return; }
+            messages.push({Sender:"me", Message:input_msg.value});
+
+            if(connection_type != ConnectionType.websocket)
+            {    
+                var xhr = new XMLHttpRequest();
+                xhr.open("POST", `${ADDRESS}/message?user_id=${user_id}&msg=${input_msg.value}`, true);
+                xhr.onload = function()
+                {
+                    if(this.status == 200)
+                    {
+                        console.log("Sent message: " + input_msg.value);
+                    }
+                    else
+                    {
+                        chat_status.innerHTML = "Other: " + this.responseText;
+                        disconnect();
+                    }
+                }
+                xhr.onerror = function()
+                {
+                    chat_status.innerHTML = "Error: " + this.responseText;
+                    disconnect();
+                }
+
+                xhr.send();
+            }
+            else
+            {
+                console.log("Sending msg via websocket");
+                
+                const data = 
+                {
+                    "user_id": `${user_id}`,
+                    "msg": input_msg.value
+                }
+                
+                socket.send(JSON.stringify(data));
+                
+            }
+
+            // Reset input text and update chat
+            input_msg.value = "";
+            update_messages();
+        }
+
+        // Disconnects before closing tab
+        window.addEventListener('onunload', function(e)
+        {
+            e.preventDefault();
+            if(connected()) disconnect();
+        });
+
+        // Sends message on enter
+        window.addEventListener('keypress', function(e)
+        {
+            if(e.key == "Enter")
+            {
+                e.preventDefault();
+                var input_msg = document.getElementById("input_message");
+                if(input_msg == document.activeElement) send_message();
+            }
+        });
+
+        // Disables option to connect
+        function disableConnection()
+        {
+            document.getElementById("poll").disabled = true;
+            document.getElementById("long_poll").disabled = true;
+            document.getElementById("websocket").disabled = true;
+            document.getElementById("disconnect").disabled = false;
+        }
+
+        // Enables option to connect
+        function enableConnection()
+        {
+            document.getElementById("poll").disabled = false;
+            document.getElementById("long_poll").disabled = false;
+            document.getElementById("websocket").disabled = false;
+            document.getElementById("disconnect").disabled = true;
+        }
+
+        enableConnection();
+
+    </script>
+</body>
+</html>
